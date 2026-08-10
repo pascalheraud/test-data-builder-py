@@ -1,9 +1,12 @@
 from abc import ABC
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.orm import Session
 
 from .data import Data
 from .database_vendor import DatabaseVendor
@@ -13,6 +16,8 @@ from .test_table import TestTable
 
 _DEFAULT_NAME = "root"
 
+Connectable = Engine | Connection | Session
+
 
 class TestDataBuilder(ABC):
     """Seeds a database with rows for repository or E2E tests, using raw SQL
@@ -20,19 +25,29 @@ class TestDataBuilder(ABC):
     (one per project) add template methods (e.g. `new_book()`) that build a
     pre-filled Data and register it via `register`.
 
-    Works identically whatever the source of `engine` (a Testcontainers
-    engine for integration tests, or any other SQLAlchemy Engine) — the
-    builder only ever depends on it.
+    Accepts an `Engine`, a `Connection`, or a `Session` — whichever is given
+    decides who manages the transaction. Given an `Engine`, the builder
+    opens and commits its own connection on every `create()`/`delete()`/
+    `count_rows()` call (e.g. seeding through a Testcontainers instance for
+    an e2e test, with no surrounding transaction to roll back). Given a
+    `Connection` or `Session`, the builder only ever executes on it — it
+    never calls `begin()`/`commit()`/`rollback()` — so a caller-driven
+    rollback (e.g. a per-test transaction rolled back in teardown) undoes
+    everything the builder inserted, the same as any other statement run on
+    that connection/session.
     """
 
-    def __init__(self, engine: Engine, vendor: DatabaseVendor) -> None:
+    def __init__(self, connectable: Connectable, vendor: DatabaseVendor) -> None:
         """
-        :param engine: the database to seed rows into
-        :param vendor: the database vendor `engine` connects to — drives how
-            the generated id is read back after an INSERT, since the
-            mechanism (and DBAPI driver) differs by vendor.
+        :param connectable: the database to seed rows into — an `Engine`
+            (the builder manages its own transaction) or an already-open
+            `Connection`/`Session` (the caller manages the transaction; the
+            builder never begins, commits, or rolls one back).
+        :param vendor: the database vendor `connectable` connects to —
+            drives how the generated id is read back after an INSERT, since
+            the mechanism (and DBAPI driver) differs by vendor.
         """
-        self._engine = engine
+        self._connectable = connectable
         self._vendor = vendor
 
         self._ordered_data: list[Data] = []
@@ -52,7 +67,28 @@ class TestDataBuilder(ABC):
         directly too instead of standing up a second connection just to
         read back what `create` inserted.
         """
-        return self._engine
+        if isinstance(self._connectable, Engine):
+            return self._connectable
+        if isinstance(self._connectable, Connection):
+            return self._connectable.engine
+        return self._connectable.get_bind()
+
+    @contextmanager
+    def _connect(self) -> Iterator[Connection]:
+        """Yields a `Connection` to run statements on. For an `Engine`, opens
+        a fresh connection and commits it on exit — self-contained, exactly
+        like v1.0's `self._engine.begin()`. For a `Connection`/`Session`,
+        yields the caller's own connection as-is and never commits or rolls
+        it back — the caller's transaction stays entirely under its control.
+        """
+        if isinstance(self._connectable, Engine):
+            with self._connectable.begin() as connection:
+                yield connection
+            return
+        if isinstance(self._connectable, Connection):
+            yield self._connectable
+            return
+        yield self._connectable.connection()
 
     def set_data_column(self, data: Data, column: TestColumn, value: Any) -> Data:
         """Sets `column` on `data`, converting `value` first if needed. A
@@ -170,7 +206,7 @@ class TestDataBuilder(ABC):
         """Number of rows currently in `table` — e.g. to assert
         `delete()`/`apply()` actually cleared it.
         """
-        with self._engine.connect() as connection:
+        with self._connect() as connection:
             return connection.execute(
                 text(f"SELECT COUNT(*) FROM {table.sql_name}")
             ).scalar_one()
@@ -188,7 +224,7 @@ class TestDataBuilder(ABC):
         see `_to_delete_tables`, populated by `_insert`, `_delete_table`, and
         `with_delete_all`.
         """
-        with self._engine.begin() as connection:
+        with self._connect() as connection:
             for table in reversed(self._to_delete_tables):
                 connection.execute(text(f"DELETE FROM {table.sql_name}"))
 
@@ -212,7 +248,7 @@ class TestDataBuilder(ABC):
         and inserted afterward without re-inserting (or re-`delete()`ing)
         what's already there.
         """
-        with self._engine.begin() as connection:
+        with self._connect() as connection:
             for data in self._ordered_data:
                 if not data.is_added:
                     self._insert(connection, data)
