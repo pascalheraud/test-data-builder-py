@@ -5,6 +5,22 @@ All notable changes to this project are documented here. Versions follow
 MINOR for backward-compatible additions, PATCH for backward-compatible bug
 fixes.
 
+## v1.1.1 — 2026-08-10
+
+### Fixed
+
+- `test-data-builder-usage` skill (`src/claude/test-data-builder-usage/SKILL.md`)
+  was still documenting the `v1.1.0` constructor as `Engine`-only. Updated
+  the "Where the `Engine`/`Connection`/`Session` comes from" section to
+  reflect the `v1.1.0` `Connectable` change, and bumped the install
+  snippet's pinned ref from `v1.0.0` to `v1.1.1`. No code change — the
+  library itself is unaffected; only the doc/skill lagged the feature it
+  documents.
+- `test-data-builder-library` skill: documented the `Connectable` decision
+  (`Engine | Connection | Session`) and added a standing rule to update
+  `test-data-builder-usage` in the same change whenever the public API
+  changes, to prevent this kind of drift going forward.
+
 ## v1.1.0 — 2026-08-10
 
 ### Added

@@ -10,6 +10,21 @@ For the model itself (`TestDataBuilder`, `Data`, `TestTable`, `TestColumn`,
 [USERGUIDE.md](../../../USERGUIDE.md) or `test-data-builder-usage` — this
 skill only captures decisions specific to *this repo's implementation*.
 
+## Update `test-data-builder-usage` whenever the public API changes
+
+`src/claude/test-data-builder-usage/SKILL.md` is the skill copied verbatim
+into consuming projects (e.g. `danslafoule`'s
+`.claude/skills/third-party/test-data-builder-usage/SKILL.md` — see that
+file's own `<!-- Source: ... -->` comment) to teach them how to *consume*
+this library. Any change to the public API or its recommended usage —
+constructor signature, a new parameter type accepted (e.g. `Connectable`
+widening to `Engine | Connection | Session` in v1.1.0), the install
+instructions, the pinned version in the install snippet — must update
+`test-data-builder-usage` in the same change, not as a follow-up. A
+consuming project only ever re-syncs that file by copying it again; it
+won't discover a usage-relevant change some other way, so leaving the skill
+stale silently breaks the guidance every consumer relies on.
+
 ## This is a port of a Java library
 
 This repo (`test-data-builder-py`) is a Python port of
@@ -78,16 +93,39 @@ a second, unrelated demo domain.
 
 ## SQLAlchemy Core as the `DataSource`/`JdbcTemplate` equivalent
 
-`TestDataBuilder.__init__` takes a SQLAlchemy `Engine`, the same role
-`DataSource` plays in the Java original — the builder never depends on
-anything else, so the same builder code works for a repository test (an
-`Engine` your test framework already manages) and an E2E test (an `Engine`
-built from a Testcontainers connection string). Raw SQL is built as
-`sqlalchemy.text()` with named (`:p0`, `:p1`, ...) placeholders rather than
-positional `?` placeholders (the JDBC/Java style) — SQLAlchemy's `text()`
-requires named parameters, and generating them positionally
-(`p{column_index}`) avoids any risk of a caller's own SQL (inside an
-`SqlExpression`) colliding with a name.
+`TestDataBuilder.__init__` takes a SQLAlchemy `Engine`, `Connection`, or
+`Session` (the `Connectable` type alias in `test_data_builder.py`), the same
+role `DataSource` plays in the Java original — the builder never depends on
+anything else, so the same builder code works for a repository test and an
+E2E test. Raw SQL is built as `sqlalchemy.text()` with named (`:p0`, `:p1`,
+...) placeholders rather than positional `?` placeholders (the JDBC/Java
+style) — SQLAlchemy's `text()` requires named parameters, and generating
+them positionally (`p{column_index}`) avoids any risk of a caller's own SQL
+(inside an `SqlExpression`) colliding with a name.
+
+**Since v1.1.0, `Connectable` is `Engine | Connection | Session`, not just
+`Engine`** ([doc/issues/3](../../../doc/issues/3/spec.md)). The type
+decides who manages the transaction — this is load-bearing, not
+incidental, so preserve it in any refactor of `_connect()`:
+
+- `Engine` → the builder opens its own connection and commits, on every
+  `create()`/`delete()`/`count_rows()` call (unchanged since v1.0.0). Right
+  for an E2E test with no surrounding transaction to roll back.
+- `Connection`/`Session` → the builder only ever executes on the object
+  given to it. It never calls `begin()`/`commit()`/`rollback()`. Right for
+  a repository test isolated by a per-test transaction rollback — passing
+  the same `Connection`/`Session` the test fixture already wraps means rows
+  the builder inserts vanish with everything else on rollback, with no
+  separate truncate/cleanup step (contrast with the "Test isolation:
+  `TRUNCATE` in fixture teardown" section below, which predates this and
+  is why `tests/conftest.py` here still truncates rather than using this
+  mode — this repo's own tests seed through a session-scoped `Engine` on
+  purpose, to exercise the `Engine` code path).
+- `builder.engine` resolves the underlying `Engine` for all three
+  (`Connection.engine` / `Session.get_bind()`) — don't let a future change
+  make this property `Engine`-input-only again; project subclasses
+  (read-back helper methods) rely on it working regardless of how the
+  builder was constructed.
 
 ## API conventions for template builders in this repo
 

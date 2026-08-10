@@ -32,13 +32,13 @@ doesn't silently move underneath the consuming project:
 
 ```bash
 # Poetry
-poetry add --group dev git+https://github.com/pascalheraud/test-data-builder-py.git#v1.0.0
+poetry add --group dev git+https://github.com/pascalheraud/test-data-builder-py.git#v1.1.1
 
 # pip
-pip install git+https://github.com/pascalheraud/test-data-builder-py.git@v1.0.0
+pip install git+https://github.com/pascalheraud/test-data-builder-py.git@v1.1.1
 
 # requirements.txt
-test-data-builder @ git+https://github.com/pascalheraud/test-data-builder-py.git@v1.0.0
+test-data-builder @ git+https://github.com/pascalheraud/test-data-builder-py.git@v1.1.1
 ```
 
 Poetry's `#<ref>` and pip's `@<ref>` syntax both accept a tag, branch, or
@@ -111,32 +111,48 @@ builder.apply()  # delete() then create()
 these in alongside `Enum`. Don't switch them to `ABC` in your own subclasses
 either, for the same reason.
 
-## Where the `Engine` comes from
+## Where the `Engine`/`Connection`/`Session` comes from
 
-- **Repository test**: reuse whatever SQLAlchemy `Engine` your test base
-  class already manages — don't stand up a second container just for the
-  builder.
+`TestDataBuilder(connectable, vendor)` accepts an `Engine`, a `Connection`,
+or a `Session` (since `v1.1.0`) — whichever you pass decides who manages
+the transaction. Full explanation in
+[USERGUIDE.md § Engine, Connection, or Session — which to pass](../../../USERGUIDE.md#engine-connection-or-session--which-to-pass).
+
+- **Repository test isolated by transaction rollback** (the common case):
+  pass the same `Connection`/`Session` your test fixture already wraps in
+  an outer transaction — reuse it directly, don't stand up a second
+  `Engine`/container. The builder never commits/rolls back on its own, so
+  everything it inserts disappears with the rest of the transaction when
+  the fixture rolls back in teardown. No separate cleanup step needed —
+  this replaces the old "give the builder session scope + truncate in
+  teardown" workaround (below) for any project on `v1.1.0`+.
 - **E2E test**: build a plain `Engine` from a Testcontainers connection
   string (`create_engine(container.get_connection_url())`) — the same
-  container your app under test is wired to.
+  container your app under test is wired to. No surrounding transaction to
+  roll back here, so `apply()`'s delete-then-insert is the cleanup
+  mechanism instead (see below).
 
 ## `apply()` vs `create()`/`delete()` alone
 
 Default to `apply()`. Reach for `create()` alone only when the tables are
 already known-clean (fresh Testcontainers database, or a repository test
-that gets rollback isolation from its base class) or when adding a second
-batch of `Data` mid-test after an earlier `apply()` already ran —
+that gets rollback isolation from its fixture/base class) or when adding a
+second batch of `Data` mid-test after an earlier `apply()` already ran —
 `create()` never deletes and only inserts rows not yet marked `is_added`,
 so it's safe to call repeatedly. Full table in
 [USERGUIDE.md § apply/delete/create](../../../USERGUIDE.md#apply-delete-create-which-one-to-call).
 
-**If you reuse a builder instance across several tests via a shared/session-scoped
+**If your project is still on an `Engine`-only builder** (pre-`v1.1.0`, or
+deliberately not passing the test's own `Connection`/`Session`) **and you
+reuse a builder instance across several tests via a shared/session-scoped
 `Engine`/container**, `builder.delete()` alone in teardown only clears
 tables *that specific builder instance* touched — a fresh builder per test
 knows about nothing. Either give the builder itself session/module scope
 too (so its `_to_delete_tables` tracking persists), or truncate explicitly
 in teardown. See this repo's own `tests/conftest.py` for a concrete example
-of the truncation approach.
+of the truncation approach — it's deliberately still `Engine`-based (to
+exercise that code path in the library's own tests), not evidence that
+`Connection`/`Session` mode is unavailable to consuming projects.
 
 ## Things easy to miss
 

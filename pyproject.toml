@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "test-data-builder"
-version = "1.1.0"
+version = "1.1.1"
 description = "Seeds a database with rows for repository or E2E tests, using raw SQL only — Python port of ovh.heraud:test-data-builder"
 authors = ["Pascal Heraud"]
 readme = "README.md"
