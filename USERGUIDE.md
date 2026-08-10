@@ -17,9 +17,11 @@ TestDataBuilder inserts rows with raw SQL, built from a table name and a
 column map — nothing that touches an ORM model or a repository. Test data
 setup can't be broken by the code under test, because it never calls into
 it. The same builder code works unmodified for a repository test (using
-whatever SQLAlchemy `Engine` your test framework already manages) and for an
-end-to-end test (using an `Engine` built directly from a Testcontainers
-database), since both are, in the end, just a SQLAlchemy `Engine`.
+whatever SQLAlchemy `Engine`, `Connection`, or `Session` your test framework
+already manages) and for an end-to-end test (using an `Engine` built
+directly from a Testcontainers database) — see
+[Engine, Connection, or Session — which to pass](#engine-connection-or-session--which-to-pass)
+below.
 
 ## Install
 
@@ -123,6 +125,48 @@ builder.apply()
 See [`apply()`, `delete()`, `create()`: which one to call](#apply-delete-create-which-one-to-call)
 below for what each one does and when to reach for it individually instead
 of `apply()`.
+
+## Engine, Connection, or Session — which to pass
+
+`TestDataBuilder(connectable, vendor)` accepts an `Engine`, a `Connection`,
+or a `Session` as `connectable` — whichever you pass determines who manages
+the transaction:
+
+- **`Engine`** — the builder opens and commits its own connection on every
+  `create()`/`delete()`/`count_rows()` call. Use this for an **end-to-end
+  test**: an `Engine` built from a Testcontainers database, with no
+  surrounding transaction to roll back — `apply()`'s delete-then-insert is
+  the cleanup mechanism there.
+- **`Connection`** or **`Session`** — the builder only ever executes on the
+  object you gave it. It never calls `begin()`, `commit()`, or `rollback()`
+  itself. Use this for a **repository test isolated by transaction
+  rollback**: pass the same `Connection`/`Session` your test fixture already
+  wraps in an outer transaction, and rows the builder inserts disappear
+  along with everything else when that transaction is rolled back in
+  teardown — no separate cleanup step needed.
+
+```python
+# Repository test: reuse the fixture's own Session, isolated by rollback
+def test_something(db_session: Session) -> None:
+    builder = MyTestDataBuilder(db_session, DatabaseVendor.POSTGRESQL)
+    builder.new_publisher()
+    builder.create()  # not apply() — nothing to delete, the transaction
+                       # started clean and will be rolled back after the test
+    ...
+
+# End-to-end test: a plain Engine, no surrounding transaction
+def test_something_e2e(app_url: str) -> None:
+    engine = create_engine(testcontainers_connection_url)
+    builder = MyTestDataBuilder(engine, DatabaseVendor.POSTGRESQL)
+    builder.new_publisher()
+    builder.apply()  # delete() then create() — the cleanup mechanism here
+    ...
+```
+
+`builder.engine` resolves to the underlying `Engine` in all three cases
+(`Connection.engine` / `Session.get_bind()` under the hood), so
+project-specific subclass code (e.g. a read-back helper method) never needs
+to know or care which of the three the builder was constructed with.
 
 ## `apply()`, `delete()`, `create()`: which one to call
 
